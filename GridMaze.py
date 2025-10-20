@@ -3,6 +3,7 @@ from gymnasium import spaces
 import pygame
 import numpy as np
 import time
+from gymnasium.wrappers import RecordVideo
 
 class GridMazeEnv(gym.Env):
     """
@@ -203,6 +204,11 @@ def get_env_dynamics(env):
     Computes the transition probabilities and rewards for the given environment.
     P[s][a] = [(prob, next_state, reward, terminated), ...]
     """
+    base_env = env
+    while hasattr(base_env, 'env'):
+        base_env = base_env.env
+
+    size = base_env.size
     P = {s: {a: [] for a in range(env.action_space.n)} for s in range(env.observation_space.n)}
     
     for s in range(env.observation_space.n):
@@ -236,16 +242,19 @@ def get_env_dynamics(env):
 def policy_evaluation(policy, V, P, gamma=0.99, theta=1e-6):
     """
     Evaluates a policy by iteratively updating the value function.
+    Terminal transitions do not include future value.
     """
     while True:
         delta = 0
         for s in range(len(V)):
             v = V[s]
-            new_v = 0
-            # For a deterministic policy, pi(a|s) is 1 for the chosen action and 0 otherwise.
+            new_v = 0.0
             a = policy[s]
             for prob, next_state, reward, terminated in P[s][a]:
-                new_v += prob * (reward + gamma * V[next_state])
+                if terminated:
+                    new_v += prob * reward
+                else:
+                    new_v += prob * (reward + gamma * V[next_state])
             V[s] = new_v
             delta = max(delta, abs(v - V[s]))
         if delta < theta:
@@ -255,6 +264,7 @@ def policy_evaluation(policy, V, P, gamma=0.99, theta=1e-6):
 def policy_improvement(policy, V, P, gamma=0.99):
     """
     Improves the policy based on the current value function.
+    Terminal transitions are treated correctly (no future value after termination).
     """
     policy_stable = True
     for s in range(len(policy)):
@@ -262,9 +272,11 @@ def policy_improvement(policy, V, P, gamma=0.99):
         action_values = np.zeros(len(P[s]))
         for a in range(len(P[s])):
             for prob, next_state, reward, terminated in P[s][a]:
-                action_values[a] += prob * (reward + gamma * V[next_state])
-        
-        policy[s] = np.argmax(action_values)
+                if terminated:
+                    action_values[a] += prob * reward
+                else:
+                    action_values[a] += prob * (reward + gamma * V[next_state])
+        policy[s] = int(np.argmax(action_values))
         if old_action != policy[s]:
             policy_stable = False
     return policy, policy_stable
@@ -300,27 +312,34 @@ def policy_iteration(env, gamma=0.99):
 
 if __name__ == "__main__":
     # --- 1. Create the environment ---
-    # To record a video, uncomment the following two lines 
-    # env = GridMazeEnv(render_mode="rgb_array")
-    
-    # env = gym.wrappers.RecordVideo(env, "./videos", episode_trigger=lambda x: x == 0)
+    env = GridMazeEnv(render_mode="rgb_array")
+    env = RecordVideo(env, "./videos", episode_trigger=lambda x: x > 0)
     # For human visualization, use this line
-    env = GridMazeEnv(render_mode="human")
+    # env = GridMazeEnv(render_mode="human")
 
     # --- 2. Run Policy Iteration ---
-    # For Policy Iteration, the environment must be fixed. 
+    # For Policy Iteration, the environment must be fixed.
     # We reset it once to generate the maze layout (G and X locations).
     env.reset()
-    
-    optimal_policy, V, num_iterations = policy_iteration(env)
-    
+
+    # Pass the base environment to policy_iteration
+    base_env = env
+    while hasattr(base_env, 'env'):
+        base_env = base_env.env
+
+    optimal_policy, V, num_iterations = policy_iteration(base_env)
+
     print("\nOptimal policy found. Displaying agent behavior.")
     print("Number of iterations to converge:", num_iterations)
-    
+
     # --- 3. Test the trained agent ---
     for episode in range(3):
         obs, info = env.reset()
-        optimal_policy, V, num_iterations = policy_iteration(env)
+        # Recompute policy for each new layout
+        base_env = env
+        while hasattr(base_env, 'env'):
+            base_env = base_env.env
+        optimal_policy, V, num_iterations = policy_iteration(base_env)
 
         terminated = False
         total_reward = 0
